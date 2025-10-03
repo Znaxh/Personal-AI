@@ -1,0 +1,85 @@
+{
+    "name": "Daily Briefing - FIXED",
+    "nodes": [
+        {
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "cronExpression",
+                            "expression": "0 8 * * *"
+                        }
+                    ]
+                }
+            },
+            "name": "Every Day at 8 AM",
+            "type": "n8n-nodes-base.cron",
+            "typeVersion": 1,
+            "position": [240, 300]
+        },
+        {
+            "parameters": {
+                "url": "http://host.docker.internal:3001/api/briefing/generate",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "bodyContentType": "json",
+                "jsonBody": "{\n  \"userId\": 1\n}"
+            },
+            "name": "Generate Daily Briefing",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.1,
+            "position": [460, 300]
+        },
+        {
+            "parameters": {
+                "url": "http://host.docker.internal:3001/api/tasks",
+                "method": "GET",
+                "options": {
+                    "qs": {
+                        "userId": "1"
+                    }
+                }
+            },
+            "name": "Get User Tasks",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.1,
+            "position": [680, 300]
+        }
+    ],
+    "connections": {
+        "Every Day at 8 AM": {
+            "main": [
+                [
+                    {
+                        "node": "Generate Daily Briefing",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Generate Daily Briefing": {
+            "main": [
+                [
+                    {
+                        "node": "Get User Tasks",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "active": false,
+    "settings": {},
+    "versionId": "1"
+}

@@ -1,0 +1,328 @@
+const express = require('express');
+const router = express.Router();
+const pool = require('../database/connection');
+const geminiService = require('../services/gemini');
+const AgentManager = require('../agents/AgentManager');
+const ragService = require('../services/rag');
+const OutputFormatter = require('../utils/OutputFormatter');
+const NotificationService = require('../services/NotificationService');
+
+// Initialize Agent Manager
+const agentManager = new AgentManager();
+
+// Generate daily briefing using AI agents
+router.post('/generate', async (req, res) => {
+    try {
+        const { userId = 1 } = req.body || {};
+        console.log(`🚀 Generating AI agent briefing for user ${userId}`);
+
+        // Use Agent Manager to generate collaborative briefing
+        const agentBriefing = await agentManager.executeAgentWorkflow(userId, 'daily_briefing');
+
+        // Store the briefing in database
+        const today = new Date().toISOString().split('T')[0];
+        const cleanBriefing = OutputFormatter.formatForPlainText(agentBriefing.briefing);
+
+        const insertResult = await pool.query(`
+            INSERT INTO briefings (user_id, content, briefing_date)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, briefing_date) 
+            DO UPDATE SET 
+                content = $2,
+                created_at = CURRENT_TIMESTAMP
+            RETURNING id, created_at
+        `, [userId, JSON.stringify({ briefing: cleanBriefing, agent_contributions: agentBriefing.agentContributions }), today]);
+
+        res.json({
+            success: true,
+            briefing: cleanBriefing,
+            formatted_briefing: OutputFormatter.formatForDisplay(agentBriefing.briefing),
+            agent_contributions: agentBriefing.agentContributions,
+            generated_at: agentBriefing.generatedAt,
+            briefing_id: insertResult.rows[0].id,
+            agent_powered: true
+        });
+
+        // Generate smart notifications after briefing is created
+        try {
+            const notificationService = new NotificationService(req.io);
+            await notificationService.notifyBriefingGenerated(userId);
+
+            // Trigger smart notification checks
+            const weatherData = agentBriefing.agentContributions?.research?.weather;
+            const newsData = agentBriefing.agentContributions?.research?.news;
+            await notificationService.runSmartNotificationChecks(userId, weatherData, newsData);
+        } catch (notificationError) {
+            console.error('❌ Smart notification error:', notificationError);
+            // Don't fail the briefing if notifications fail
+        }
+
+    } catch (error) {
+        console.error('❌ Agent briefing generation error:', error);
+
+        // Fallback to traditional briefing if agents fail
+        try {
+            const fallbackBriefing = await generateFallbackBriefing(req.body.userId || 1);
+            const cleanFallback = OutputFormatter.formatForPlainText(fallbackBriefing);
+
+            res.json({
+                success: true,
+                briefing: cleanFallback,
+                formatted_briefing: OutputFormatter.formatForDisplay(fallbackBriefing),
+                fallback_mode: true,
+                error: 'Agent system unavailable, using fallback'
+            });
+        } catch (fallbackError) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to generate briefing',
+                details: error.message
+            });
+        }
+    }
+});
+
+// Fallback briefing generation (original method)
+async function generateFallbackBriefing(userId) {
+    const tasksResult = await pool.query(`
+      SELECT title, description, priority, due_date, status
+      FROM tasks 
+      WHERE user_id = $1 
+      AND (due_date >= CURRENT_DATE OR due_date IS NULL)
+      AND status != 'completed'
+      ORDER BY priority DESC, due_date ASC
+    `, [userId]);
+
+    const weather = "Weather data unavailable in fallback mode.";
+    const news = "External news unavailable in fallback mode.";
+
+    return await geminiService.generateDailyBriefing(
+        tasksResult.rows,
+        weather,
+        news
+    );
+}
+
+// Add agent status endpoint
+router.get('/agent-status', async (req, res) => {
+    try {
+        const status = await agentManager.getAgentStatus();
+        res.json({
+            success: true,
+            data: status
+        });
+    } catch (error) {
+        console.error('❌ Agent status error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get agent status'
+        });
+    }
+});
+
+// Generate task planning with agents
+router.post('/plan-tasks', async (req, res) => {
+    try {
+        const { userId = 1 } = req.body;
+        console.log(`📅 Generating task plan for user ${userId}`);
+
+        const taskPlan = await agentManager.executeAgentWorkflow(userId, 'task_planning');
+
+        res.json({
+            success: true,
+            data: taskPlan,
+            agent_powered: true
+        });
+    } catch (error) {
+        console.error('❌ Task planning error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to generate task plan'
+        });
+    }
+});
+
+// Research query endpoint
+router.post('/research', async (req, res) => {
+    try {
+        const { query, userId = 1 } = req.body;
+
+        if (!query) {
+            return res.status(400).json({
+                success: false,
+                error: 'Query parameter is required'
+            });
+        }
+
+        console.log(`🔍 Research query: ${query}`);
+        const researchResults = await agentManager.executeAgentWorkflow(userId, 'research_query');
+
+        res.json({
+            success: true,
+            data: researchResults,
+            agent_powered: true
+        });
+    } catch (error) {
+        console.error('❌ Research query error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to execute research query'
+        });
+    }
+});
+
+// Get today's briefing
+router.get('/today', async (req, res) => {
+    try {
+        const { userId = 1 } = req.query;
+        const today = new Date().toISOString().split('T')[0];
+
+        const result = await pool.query(`
+      SELECT content, created_at
+      FROM briefings 
+      WHERE user_id = $1 AND briefing_date = $2
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [userId, today]);
+
+        if (result.rows.length === 0) {
+            return res.json({
+                success: true,
+                data: null,
+                message: 'No briefing found for today. Generate one first.'
+            });
+        }
+
+        res.json({
+            success: true,
+            data: result.rows[0].content
+        });
+    } catch (error) {
+        console.error('❌ Get briefing error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch today\'s briefing'
+        });
+    }
+});
+
+// Get briefing history
+router.get('/history', async (req, res) => {
+    try {
+        const { userId = 1, limit = 7 } = req.query;
+
+        const result = await pool.query(`
+      SELECT content, briefing_date, created_at
+      FROM briefings 
+      WHERE user_id = $1 
+      ORDER BY briefing_date DESC 
+      LIMIT $2
+    `, [userId, limit]);
+
+        res.json({
+            success: true,
+            data: result.rows
+        });
+    } catch (error) {
+        console.error('❌ Briefing history error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch briefing history'
+        });
+    }
+});
+
+// RAG Document Upload endpoint
+router.post('/upload-document', async (req, res) => {
+    try {
+        const { title, content, userId = 1 } = req.body;
+
+        if (!title || !content) {
+            return res.status(400).json({
+                success: false,
+                error: 'Title and content are required'
+            });
+        }
+
+        console.log(`📄 Uploading document: ${title}`);
+
+        // Store document in RAG service (ChromaDB)
+        await ragService.addDocument(`doc_${Date.now()}`, content, {
+            title,
+            userId,
+            source: 'user_upload',
+            timestamp: new Date().toISOString()
+        });
+
+        // Store in database - metadata only (vectors in ChromaDB)
+        const insertResult = await pool.query(`
+            INSERT INTO documents (user_id, title, content, metadata, created_at)
+            VALUES ($1, $2, $3, $4::jsonb, NOW())
+            RETURNING id, created_at
+        `, [userId, title, content, JSON.stringify({ source: 'upload' })]);
+
+        res.json({
+            success: true,
+            document_id: insertResult.rows[0].id,
+            message: 'Document uploaded and processed for RAG',
+            embedding_dimensions: embedding.length
+        });
+
+    } catch (error) {
+        console.error('❌ Document upload error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to upload document',
+            details: error.message
+        });
+    }
+});
+
+// RAG Query endpoint
+router.post('/rag-query', async (req, res) => {
+    try {
+        const { query, userId = 1, limit = 5 } = req.body;
+
+        if (!query) {
+            return res.status(400).json({
+                success: false,
+                error: 'Query is required'
+            });
+        }
+
+        console.log(`🔍 RAG Query: ${query}`);
+
+        // Use RAG service for semantic search
+        const searchResults = await ragService.searchSimilar(query, limit);
+
+        // Also search user's database content
+        const dbResults = await ragService.searchUserData(query, userId, limit);
+
+        // Combine and deduplicate results
+        const allResults = [...searchResults, ...dbResults];
+        const uniqueResults = allResults.slice(0, limit);
+
+        res.json({
+            success: true,
+            query,
+            similar_documents: uniqueResults.map(doc => ({
+                id: doc.id,
+                title: doc.title || 'Untitled',
+                content: doc.content.substring(0, 200) + '...',
+                similarity: doc.score || 0,
+                metadata: doc.metadata || {}
+            })),
+            total_documents: uniqueResults.length
+        });
+
+    } catch (error) {
+        console.error('❌ RAG query error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to execute RAG query',
+            details: error.message
+        });
+    }
+});
+
+module.exports = router;

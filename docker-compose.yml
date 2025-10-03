@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # ChromaDB Vector Database
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks:
+      - ai-copilot-network
+
+  # n8n Automation Platform
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    env_file:
+      - .env
+    environment:
+      - GENERIC_TIMEZONE=UTC
+      - DB_TYPE=${DB_TYPE:-sqlite}
+      - N8N_LOG_LEVEL=${N8N_LOG_LEVEL:-info}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/.n8n/workflows
+    networks:
+      - ai-copilot-network
+
+  # Backend API
+  backend:
+    build: ./backend
+    env_file:
+      - .env
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - CHROMA_URL=http://chromadb:8000
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - WEATHER_API_KEY=${WEATHER_API_KEY}
+      - NEWS_API_KEY=${NEWS_API_KEY}
+    depends_on:
+      - chromadb
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    networks:
+      - ai-copilot-network
+
+networks:
+  ai-copilot-network:
+    driver: bridge
+
+volumes:
+  chroma_data:
+  n8n_data:
